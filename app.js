@@ -4,6 +4,7 @@ import bodyParser from 'body-parser';
 // ---------------
 import apiRoutes from './routes/apiRoute.js';
 import dotenv from 'dotenv';
+import postsRoute from './routes/postsRoute.js';
 dotenv.config();
 const port = process.env.PORT;
 
@@ -23,6 +24,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/api', apiRoutes);
+app.use('/api', postsRoute);
 
 app.get('/', (req, res) => {
 	res.send('Hello World!');

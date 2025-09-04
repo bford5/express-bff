@@ -12,6 +12,6 @@ import { getPostsRouteController } from '../controllers/postsRouteController.js'
 
 const router = express.Router();
 
-router.get('/api-routes', getPostsRouteController);
+router.get('/posts', getPostsRouteController);
 
 export default router;
