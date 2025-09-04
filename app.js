@@ -24,7 +24,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/api', apiRoutes);
-app.use('/api', postsRoute);
+app.use('/api/posts', postsRoute);
 
 app.get('/', (req, res) => {
 	res.send('Hello World!');

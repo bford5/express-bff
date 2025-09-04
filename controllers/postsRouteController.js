@@ -11,7 +11,7 @@ export const getPostsRouteController = async (_, response) => {
 			return response.send({ error });
 		}
 		console.log('--------------------------------');
-		console.log('POST data from supabase');
+		console.log('POSTS data from supabase');
 		console.log(data);
 		console.log('--------------------------------');
 		return response.send(data);
