@@ -1,4 +1,5 @@
 import supabase from '../supabase/supabase_server.js';
+import { localLogger } from '../helpers/localLogger.js';
 
 export const getPostsRouteController = async (_, response) => {
 	try {
@@ -7,20 +8,12 @@ export const getPostsRouteController = async (_, response) => {
 			.select('*')
 			.eq('isActive', true);
 		if (error) {
-			console.log('--------------------------------');
-			console.log(new Date().toISOString());
-			console.log('error getting posts');
-			console.log(error);
-			console.log('--------------------------------');
+			localLogger('error getting posts', error);
 			return response.status(status || 500).json({
 				error: { message: 'Failed to fetch posts' }, // safe, client-facing
 			});
 		}
-		console.log('--------------------------------');
-		console.log(new Date().toISOString());
-		console.log('POSTS data from supabase');
-		console.log(data);
-		console.log('--------------------------------');
+		localLogger('POSTS data from supabase', data);
 		return response.status(200).send(data);
 		// return response.status(200).json({
 		// 	posts: data,
@@ -40,10 +33,7 @@ export const getPostsRouteControllerWithCache = async (_, response) => {
 	try {
 		// serve from cache if fresh
 		if (postsCache.data && Date.now() < postsCache.expiresAt) {
-			console.log('--------------------------------');
-			console.log(new Date().toISOString());
-			console.log('serving from CACHE');
-			console.log('--------------------------------');
+			localLogger('serving from CACHE');
 			return response
 				.status(200)
 				.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300')
@@ -55,18 +45,10 @@ export const getPostsRouteControllerWithCache = async (_, response) => {
 			.from('posts')
 			.select('*')
 			.eq('isActive', true);
-		console.log('--------------------------------');
-		console.log(new Date().toISOString());
-		console.log('fetching posts FRESH');
-		console.log(data);
-		console.log('--------------------------------');
+		localLogger('fetching posts FRESH', data);
 
 		if (error) {
-			console.log('--------------------------------');
-			console.log(new Date().toISOString());
-			console.log('error fetching posts');
-			console.log(error);
-			console.log('--------------------------------');
+			localLogger('error fetching posts', error);
 			return response.status(status || 500).json({
 				error: { message: 'Failed to fetch posts' },
 			});

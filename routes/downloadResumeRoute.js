@@ -7,6 +7,7 @@ export const routesMeta = [
 import { Router } from 'express';
 import { supabaseAdmin } from '../supabase/supabase_admin.js';
 import { Readable } from 'node:stream';
+import { localLogger } from '../helpers/localLogger.js';
 
 const router = Router();
 
@@ -25,10 +26,11 @@ router.get('/', async (req, res) => {
       .download(OBJECT_PATH);
 	
 	  if (data) {
-		console.log('--------------------------------');
-		console.log(new Date().toISOString());
-		console.log('file from supabase acquired');
-		console.log('--------------------------------');
+		// console.log('--------------------------------');
+		// console.log(new Date().toISOString());
+		// console.log('file from supabase acquired');
+		// console.log('--------------------------------');
+		localLogger('file from supabase acquired');
 	  }
 
     if (error || !data) {
