@@ -6,7 +6,8 @@
 	"type": "module",
 	"scripts": {
 		"test": "echo \"Error: no test specified\" && exit 1",
-		"start": "nodemon app.js"
+		"start": "nodemon app.js",
+		"dev": "nodemon --watch . --ext ts,js --exec node --import ts-node/register/esm app.ts"
 	},
 	"author": "",
 	"license": "ISC",
@@ -16,7 +17,14 @@
 		"cors": "^2.8.5",
 		"dotenv": "^17.2.2",
 		"express": "^5.1.0",
-		"express-rate-limit": "^8.1.0",
-		"nodemon": "^3.1.10"
+		"express-rate-limit": "^8.1.0"
+	},
+	"devDependencies": {
+		"@types/cors": "^2.8.19",
+		"@types/node": "^24.3.1",
+		"nodemon": "^3.1.10",
+		"ts-node": "^10.9.2",
+		"tsx": "^4.20.5",
+		"typescript": "^5.9.2"
 	}
 }

@@ -5,7 +5,8 @@ export const routesMeta = [
 ];
 // ---------------
 import { Router } from 'express';
-import { supabaseAdmin } from '../supabase/supabase_admin.js';
+// import { supabaseAdmin } from '../supabase/supabase_admin.js';
+import supabase from '../supabase/supabase_server.js';
 import { Readable } from 'node:stream';
 import { localLogger } from '../helpers/localLogger.js';
 
@@ -20,12 +21,12 @@ router.get('/', async (req, res) => {
   try {
     // (Optional) authorize the user here if needed (req.user, cookie, etc.)
 
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await /*supabaseAdmin*/ supabase
       .storage
       .from(BUCKET)
       .download(OBJECT_PATH);
 	
-	  if (data) {
+	  if (data && !error) {
 		// console.log('--------------------------------');
 		// console.log(new Date().toISOString());
 		// console.log('file from supabase acquired');

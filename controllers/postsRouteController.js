@@ -37,7 +37,8 @@ export const getPostsRouteControllerWithCache = async (_, response) => {
 			return response
 				.status(200)
 				.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300')
-				.send(postsCache.data);
+				.json(postsCache.data);
+				// .send(postsCache.data);
 		}
 
 		// fetch fresh
@@ -60,7 +61,8 @@ export const getPostsRouteControllerWithCache = async (_, response) => {
 		return response
 			.status(200)
 			.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300')
-			.send(data);
+			.json(data);
+			// .send(data);
 	} catch (error) {
 		return response.status(500).json({ error: { message: 'Unexpected error' } });
 	}
