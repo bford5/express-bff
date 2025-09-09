@@ -1,12 +1,14 @@
-{
-	"compilerOptions": {
-	  "esModuleInterop": true,
-	  "moduleResolution": "NodeNext",
-	  "module": "NodeNext",
-	  "target": "ES2022",
-	  "types": ["node"],
-	  "strict": true,
-	  "skipLibCheck": true
-	},
-	"include": ["**/*.ts", "**/*.d.ts", "types/**/*.d.ts", "app.js"]
-  }
+// {
+// 	"compilerOptions": {
+// 	  "esModuleInterop": true,
+// 	  "moduleResolution": "NodeNext",
+// 	  "module": "NodeNext",
+// 	  "target": "ES2022",
+// 	  "types": ["node"],
+// 	  "strict": true,
+// 	  "skipLibCheck": true,
+// 	  "allowJs": true
+// 	},
+// 	"include": ["**/*.ts", "**/*.d.ts", "types/**/*.d.ts", "app.js"],
+// 	"exclude": ["node_modules"]
+//   }
