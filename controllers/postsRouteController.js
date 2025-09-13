@@ -19,7 +19,8 @@ export const getPostsRouteController = async (_, response) => {
 		// 	posts: data,
 		// });
 	} catch (error) {
-		return response.send({ error });
+		// return response.send({ error });
+		return response.status(500).json({ error: { message: 'Unexpected error' } });
 	}
 };
 

@@ -10,8 +10,17 @@ import { fileURLToPath, pathToFileURL } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+let routesCache = { data: null, expiresAt: 0 };
+const TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 export async function getApiRoutesController(req, res) {
 	try {
+		// serve from cache if fresh
+		if (routesCache.data && Date.now() < routesCache.expiresAt) {
+			return res.status(200).json(routesCache.data);
+		}
+
+		// fetch fresh
 		const routesDir = path.join(__dirname, '../routes');
 		const files = (await readdir(routesDir)).filter((f) => f.endsWith('.js'));
 		const allRoutesMeta = [];
@@ -26,6 +35,8 @@ export async function getApiRoutesController(req, res) {
 				}
 			})
 		);
+		
+		routesCache = {data: allRoutesMeta, expiresAt: Date.now() + TTL_MS};
 
 		res.status(200).json({ routes: allRoutesMeta });
 	} catch (err) {

@@ -7,11 +7,13 @@ export const routesMeta = [
 ];
 // ---------------
 import express from 'express';
+import {rateLimit} from 'express-rate-limit';
 
 import { getApiRoutesController } from '../controllers/apiRouteController.js';
 
 const router = express.Router();
+const routesRateLimiter = rateLimit({ windowMs: 60 * 1000, limit: 25 });
 
-router.get('/api-routes', getApiRoutesController);
+router.get('/api-routes', routesRateLimiter, getApiRoutesController);
 
 export default router;

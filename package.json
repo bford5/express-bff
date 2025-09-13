@@ -7,7 +7,7 @@
 	"scripts": {
 		"test": "echo \"Error: no test specified\" && exit 1",
 		"start": "nodemon app.js",
-		"dev": "nodemon --watch . --ext ts,js --exec node --import ts-node/register/esm app.ts"
+		"dev": "nodemon --watch . --ext ts,js --exec node --import ts-node/register/esm app.js"
 	},
 	"author": "",
 	"license": "ISC",

@@ -13,6 +13,7 @@ import apiRoutes from './routes/apiRoute.js';
 import postsRoute from './routes/postsRoute.js';
 import downloadResumeRoute from './routes/downloadResumeRoute.js';
 import rateLimiter from './middleware/rateLimiter.js';
+import { localLogger } from './helpers/localLogger.js';
 // ---------------
 dotenv.config();
 const port = process.env.PORT;
@@ -20,15 +21,23 @@ const port = process.env.PORT;
 // ---------------
 const app = express();
 // ---------------
+const isProdEnv = process.env.NODE_ENV === 'production';
 // Run behind proxy (Render) so req.secure & cookies honor X-Forwarded-Proto:
 // https://expressjs.com/en/guide/behind-proxies.html
 app.set("trust proxy", 1);
-app.use(helmet());
-app.use(express.json()); // or express.urlencoded({ extended: true })
+app.use(helmet({
+	hsts: false,
+	referrerPolicy: { policy: 'no-referrer' },
+}));
+if (isProdEnv) {
+	app.use(helmet.hsts({ maxAge: 15552000, includeSubDomains: true, preload: true }));
+}
+app.use(express.json({ limit: '25kb' })); // or express.urlencoded({ extended: true })
+app.use(express.urlencoded({ extended: false, limit: '25kb'}))
 app.use(cookieParser());
 // ---------------
 
-const isProdEnv = process.env.NODE_ENV === 'production';
+
 const allowlist = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(s => s.trim().replace(/\/$/, '')) // normalize trailing slash
@@ -37,6 +46,8 @@ if (!isProdEnv && allowlist.length === 0) {
   // Dev-safe defaults
   allowlist.push('http://localhost:4321', 'http://127.0.0.1:4321');
 }
+
+
 
 const corsDelegate = (req, cb) => {
 	const requested = req.headers['access-control-request-headers'];
@@ -70,6 +81,9 @@ app.options(/.*/, cors(corsDelegate));
 // Don't rate-limit preflights (OPTIONS carry no creds)
 app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : next()));
 
+const generalLimiter = rateLimit({ windowMs: 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false });
+app.use(generalLimiter);
+
 // --------------------------------
 // --------------------------------
 // -------------AIAC---------------
@@ -102,7 +116,7 @@ setInterval(() => {
 	for (const [sid, s] of sessions) {
 		if (s.expires_at && s.expires_at < now - 300) sessions.delete(sid);
 	}
-}, 60_000);
+}, 60_000).unref();
 
 function b64url(buf) {
 	return Buffer.from(buf).toString('base64url');
@@ -208,6 +222,7 @@ app.post('/auth/login', authLimiter, requireCsrf, async (req, res) => {
 	const sid = b64url(crypto.randomBytes(32));
 	sessions.set(sid, { access_token, refresh_token, expires_at });
 	setSidCookie(res, sid);
+	localLogger('auth-in request successful', {email})
 	res.status(204).end();
 });
 
@@ -220,6 +235,7 @@ app.post('/auth/logout', authLimiter, requireCsrf, async (req, res) => {
 	}
 	// Clear cookie using the same attributes used when setting it
 	res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
+	localLogger('auth-out request successful')
 	res.status(204).end();
 });
 
@@ -279,6 +295,22 @@ app.get('/', (_, res) => {
 	res.send('Hello World!');
 });
 
+// lightweight health check
+app.get('/health', (_, res) => res.status(200).json({ status: 'ok' }));
+
+app.use((_, res) => res.status(404).json({ error: 'Not found' }));
+app.use((err, req, res, next) => {
+  console.error('[Unhandled error]', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 app.listen(port, () => {
 	console.log(`Starting server on port: ${port}`);
 });
+
+server.headersTimeout = 62000;   // 62s
+server.keepAliveTimeout = 61000; // 61s
+// how long the server keeps the TCP connection idle waiting for the next request before destroying the socket
+// For apps behind load balancers (ALB/ELB, GCP, etc.), it’s common to set keepAliveTimeout slightly above the LB’s idle timeout (e.g., 61s for a 60s LB) so the server doesn’t close first, avoiding intermittent 502/ECONNRESET issues.
+// Also, make headersTimeout a bit greater than keepAliveTimeout (e.g., 62s vs 61s) so when a client reuses a keep-alive connection, there’s a small grace period to deliver the next request’s headers. Your code currently has headersTimeout (60s) below keepAliveTimeout (61s); flip that to follow the common guidance.
+server.requestTimeout = 30000;   // 30s
