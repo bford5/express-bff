@@ -14,10 +14,11 @@ import postsRoute from './routes/postsRoute.js';
 import downloadResumeRoute from './routes/downloadResumeRoute.js';
 import rateLimiter from './middleware/rateLimiter.js';
 import { localLogger } from './helpers/localLogger.js';
+import { redisSessionStore } from './helpers/redisSessionStore.js';
 // ---------------
 dotenv.config();
 const port = process.env.PORT;
-
+const IS_PROD = process.env.NODE_ENV === 'production';
 // ---------------
 const app = express();
 // ---------------
@@ -81,8 +82,24 @@ app.options(/.*/, cors(corsDelegate));
 // Don't rate-limit preflights (OPTIONS carry no creds)
 app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : next()));
 
+
+// Session config (idle + absolute lifetimes)
+const SESSION_IDLE_TTL_SECONDS = Number(process.env.SESSION_IDLE_TTL_SECONDS || (IS_PROD ? 1800 : 7200)); // 30m prod, 2h dev
+const SESSION_ABSOLUTE_LIFETIME_SECONDS = Number(process.env.SESSION_ABSOLUTE_LIFETIME_SECONDS || (IS_PROD ? 604800 : 2592000)); // 7d prod, 30d dev
+
 const generalLimiter = rateLimit({ windowMs: 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false });
 app.use(generalLimiter);
+// Sliding idle expiration for any request carrying a session cookie
+app.use(async (req, res, next) => {
+	const sid = req.cookies?.sid;
+	if (sid) {
+		void redisSessionStore
+		  .touch(sid, SESSION_IDLE_TTL_SECONDS)
+		  .catch(err => console.warn('session touch failed', { err }));
+	}	  
+	// ^^ keeps the call non-blocking, silences the linter intentionally, and prevents unhandled rejections from taking down server
+	next();
+});
 
 // --------------------------------
 // --------------------------------
@@ -91,7 +108,7 @@ app.use(generalLimiter);
 // const IS_PROD = process.env.NODE_ENV === 'production';
 // const CSRF_COOKIE = '__Host-csrf_secret';
 // const CSRF_HEADER = 'X-CSRF-Token';
-const IS_PROD = process.env.NODE_ENV === 'production';
+// const IS_PROD = process.env.NODE_ENV === 'production';
 const CSRF_COOKIE = IS_PROD ? '__Host-csrf_secret' : 'csrf_secret';
 const CSRF_HEADER = 'X-CSRF-Token';
 const CSRF_TTL_SECONDS = 300; // 5m
@@ -107,16 +124,16 @@ if (!SUPABASE_URL || !SUPABASE_ANON) {
 	process.exit(1);
 }
 
-// In-memory session store (replace with Redis/DB in production)
-const sessions = new Map();
+// // In-memory session store (replace with Redis/DB in production)
+// const sessions = new Map();
 
-// Added: basic expiry cleanup for stale sessions
-setInterval(() => {
-	const now = Math.floor(Date.now()/1000);
-	for (const [sid, s] of sessions) {
-		if (s.expires_at && s.expires_at < now - 300) sessions.delete(sid);
-	}
-}, 60_000).unref();
+// // Added: basic expiry cleanup for stale sessions
+// setInterval(() => {
+// 	const now = Math.floor(Date.now()/1000);
+// 	for (const [sid, s] of sessions) {
+// 		if (s.expires_at && s.expires_at < now - 300) sessions.delete(sid);
+// 	}
+// }, 60_000).unref();
 
 function b64url(buf) {
 	return Buffer.from(buf).toString('base64url');
@@ -220,18 +237,29 @@ app.post('/auth/login', authLimiter, requireCsrf, async (req, res) => {
 
 	const { access_token, refresh_token, expires_at } = data.session;
 	const sid = b64url(crypto.randomBytes(32));
-	sessions.set(sid, { access_token, refresh_token, expires_at });
+	// sessions.set(sid, { access_token, refresh_token, expires_at });
+	await redisSessionStore.set(
+		sid,
+		{ access_token, refresh_token, expires_at },
+		SESSION_IDLE_TTL_SECONDS,
+		SESSION_ABSOLUTE_LIFETIME_SECONDS
+	);
 	setSidCookie(res, sid);
 	localLogger('auth-in request successful', {email})
-	res.status(204).end();
+	res.status(204).end();	
 });
 
 app.post('/auth/logout', authLimiter, requireCsrf, async (req, res) => {
 	const sid = req.cookies?.sid;
-	const sess = sid ? sessions.get(sid) : null;
-	if (sess) {
-		await supaWithToken(sess.access_token).auth.signOut();
-		sessions.delete(sid);
+	// const sess = sid ? sessions.get(sid) : null;
+	// if (sess)
+	if (sid) {
+		const sess = await redisSessionStore.get(sid);
+		if (sess) {
+			await supaWithToken(sess.access_token).auth.signOut();
+		}
+		// sessions.delete(sid);
+		await redisSessionStore.del(sid);
 	}
 	// Clear cookie using the same attributes used when setting it
 	res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
@@ -243,18 +271,21 @@ app.post('/auth/logout', authLimiter, requireCsrf, async (req, res) => {
 app.post('/auth/refresh', authLimiter, requireCsrf, async (req, res) => {
 	const sid = req.cookies?.sid;
 	if (!sid) return res.status(401).json({ error: 'not authenticated' });
-	const sess = sessions.get(sid);
+	// const sess = sessions.get(sid);
+	const sess = await redisSessionStore.get(sid);
 	if (!sess) return res.status(401).json({ error: 'not authenticated' });
 
 	const { data, error } = await supaAnon().auth.refreshSession({ refresh_token: sess.refresh_token });
 	if (error || !data?.session) {
-		sessions.delete(sid);
+		// sessions.delete(sid);
+		await redisSessionStore.del(sid);
 		// Clear cookie using the same attributes used when setting it
 		res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
 		return res.status(401).json({ error: 'refresh failed' });
 	}
 	const { access_token, refresh_token, expires_at } = data.session;
-	sessions.set(sid, { access_token, refresh_token, expires_at });
+	// sessions.set(sid, { access_token, refresh_token, expires_at });
+	await redisSessionStore.set(sid,{ access_token, refresh_token, expires_at }, SESSION_IDLE_TTL_SECONDS, SESSION_ABSOLUTE_LIFETIME_SECONDS);
 	res.status(204).end();
 });
 
@@ -262,7 +293,8 @@ app.post('/auth/refresh', authLimiter, requireCsrf, async (req, res) => {
 app.get('/auth/session', authLimiter, async (req, res) => {
 	const sid = req.cookies?.sid;
 	if (!sid) return res.status(401).json({ authenticated: false });
-	const sess = sessions.get(sid);
+	// const sess = sessions.get(sid);
+	const sess = await redisSessionStore.get(sid);
 	if (!sess) return res.status(401).json({ authenticated: false });
 
 	// Optionally auto-refresh if near expiry
@@ -270,19 +302,54 @@ app.get('/auth/session', authLimiter, async (req, res) => {
 	if (sess.expires_at && now > (sess.expires_at - 30)) {
 		const { data, error } = await supaAnon().auth.refreshSession({ refresh_token: sess.refresh_token });
 		if (error || !data?.session) {
-			sessions.delete(sid);
+			// sessions.delete(sid);
+			await redisSessionStore.del(sid);
 			// Clear cookie using the same attributes used when setting it
 			res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
 			return res.status(401).json({ authenticated: false });
 		}
 		const { access_token, refresh_token, expires_at } = data.session;
-		sessions.set(sid, { access_token, refresh_token, expires_at });
+		// sessions.set(sid, { access_token, refresh_token, expires_at });
+		await redisSessionStore.set(sid, { access_token, refresh_token, expires_at }, SESSION_IDLE_TTL_SECONDS, SESSION_ABSOLUTE_LIFETIME_SECONDS);
 	}
 
-	const { data, error } = await supaWithToken(sessions.get(sid).access_token).auth.getUser();
+	const current = await redisSessionStore.get(sid);
+	if (!current) return res.status(401).json({ authenticated: false });
+
+	const { data, error } = await supaWithToken(current.access_token).auth.getUser();
 	if (error) return res.status(401).json({ authenticated: false });
 	res.json({ authenticated: true, user: data.user });
 });
+
+/*
+app.get('/auth/session', authLimiter, async (req, res) => {
+	const sid = req.cookies?.sid;
+	if (!sid) return res.status(401).json({ authenticated: false });
+	const sess = await redisSessionStore.get(sid);
+	if (!sess) return res.status(401).json({ authenticated: false });
+
+	// Optionally auto-refresh if near expiry
+	const now = Math.floor(Date.now() / 1000);
+	if (sess.expires_at && now > (sess.expires_at - 30)) {
+		const { data, error } = await supaAnon().auth.refreshSession({ refresh_token: sess.refresh_token });
+		if (error || !data?.session) {
+			await redisSessionStore.del(sid);
+			res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
+			return res.status(401).json({ authenticated: false });
+		}
+		const { access_token, refresh_token, expires_at } = data.session;
+		await redisSessionStore.set(sid, { access_token, refresh_token, expires_at }, SESSION_IDLE_TTL_SECONDS, SESSION_ABSOLUTE_LIFETIME_SECONDS);
+	}
+
+	// FIX: read the current token before calling Supabase
+	const current = await redisSessionStore.get(sid);
+	if (!current) return res.status(401).json({ authenticated: false });
+
+	const { data, error } = await supaWithToken(current.access_token).auth.getUser();
+	if (error) return res.status(401).json({ authenticated: false });
+	res.json({ authenticated: true, user: data.user });
+});
+*/
 // -------------AIAC---------------
 // --------------------------------
 // --------------------------------
@@ -308,9 +375,38 @@ app.listen(port, () => {
 	console.log(`Starting server on port: ${port}`);
 });
 
-server.headersTimeout = 62000;   // 62s
-server.keepAliveTimeout = 61000; // 61s
+app.headersTimeout = 62000;   // 62s
+app.keepAliveTimeout = 61000; // 61s
 // how long the server keeps the TCP connection idle waiting for the next request before destroying the socket
 // For apps behind load balancers (ALB/ELB, GCP, etc.), it’s common to set keepAliveTimeout slightly above the LB’s idle timeout (e.g., 61s for a 60s LB) so the server doesn’t close first, avoiding intermittent 502/ECONNRESET issues.
 // Also, make headersTimeout a bit greater than keepAliveTimeout (e.g., 62s vs 61s) so when a client reuses a keep-alive connection, there’s a small grace period to deliver the next request’s headers. Your code currently has headersTimeout (60s) below keepAliveTimeout (61s); flip that to follow the common guidance.
-server.requestTimeout = 30000;   // 30s
+app.requestTimeout = 30000;   // 30s
+
+// --------------------------------
+// graceful shutdown
+
+const gracefulShutdown = (signal) => {
+	console.log(`Received ${signal}, shutting down gracefully...`);
+
+	console.log('Server closed');
+	process.exit(0);
+
+
+	// const FORCE = setTimeout(() => {
+	// 	console.error('Graceful shutdown timed out — forcing close.');
+	// 	// try { redis.destroy(); } catch {}
+	// 	process.exit(1);
+	//   }, 30_000).unref();
+
+	// app.close(() => {
+	// 	// try { if (redis.isOpen) await redis.close(); } catch (e) { console.error('redis.close error:', e); }
+    // 	clearTimeout(FORCE);
+
+	// 	console.log('Server closed');
+	// 	process.exit(0);
+	// });
+};
+
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+// sigterm used for kubernetes
