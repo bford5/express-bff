@@ -1,16 +1,20 @@
-import supabase from '../supabase/supabase_server.js';
+// import supabase from '../supabase/supabase_server.js';
+import { supaAnon } from '../supabase/clients.js';
 import { localLogger } from '../helpers/localLogger.js';
 
 export const getPostsRouteController = async (_, response) => {
 	try {
+		const supabase = supaAnon();
 		const { data, error, status } = await supabase
 			.from('posts')
-			.select('*')
+			// .select('*')
+			.select('postID,postTitle,postBody,created_at')
 			.eq('isActive', true);
 		if (error) {
 			localLogger('error getting posts', error);
 			return response.status(status || 500).json({
-				error: { message: 'Failed to fetch posts' }, // safe, client-facing
+				// error: { message: 'Failed to fetch posts' }, // safe, client-facing
+				error: { code: 'FETCH_FAILED', message: 'Failed to fetch posts' },
 			});
 		}
 		localLogger('POSTS data from supabase', data);
@@ -20,7 +24,8 @@ export const getPostsRouteController = async (_, response) => {
 		// });
 	} catch (error) {
 		// return response.send({ error });
-		return response.status(500).json({ error: { message: 'Unexpected error' } });
+		// return response.status(500).json({ error: { message: 'Unexpected error' } });
+		return response.status(500).json({ error: { code: 'UNEXPECTED', message: 'Unexpected error' } });
 	}
 };
 
@@ -43,16 +48,19 @@ export const getPostsRouteControllerWithCache = async (_, response) => {
 		}
 
 		// fetch fresh
+		const supabase = supaAnon();
 		const { data, error, status } = await supabase
 			.from('posts')
-			.select('*')
+			// .select('*')
+			.select('postID,postTitle,postBody,created_at')
 			.eq('isActive', true);
 		localLogger('fetching posts FRESH', data);
 
 		if (error) {
 			localLogger('error fetching posts', error);
 			return response.status(status || 500).json({
-				error: { message: 'Failed to fetch posts' },
+				// error: { message: 'Failed to fetch posts' },
+				error: { code: 'FETCH_FAILED', message: 'Failed to fetch posts' },
 			});
 		}
 
@@ -65,6 +73,7 @@ export const getPostsRouteControllerWithCache = async (_, response) => {
 			.json(data);
 			// .send(data);
 	} catch (error) {
-		return response.status(500).json({ error: { message: 'Unexpected error' } });
+		// return response.status(500).json({ error: { message: 'Unexpected error' } });
+		return response.status(500).json({ error: { code: 'UNEXPECTED', message: 'Unexpected error' } });
 	}
 };

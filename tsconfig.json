@@ -12,3 +12,10 @@
 // 	"include": ["**/*.ts", "**/*.d.ts", "types/**/*.d.ts", "app.js"],
 // 	"exclude": ["node_modules"]
 //   }
+
+{
+	"compilerOptions": {
+		"strict": true,
+	},
+}
+// basic TS config per zod

@@ -1,4 +1,5 @@
 import express /*{type Application, type Request, type Response, type NextFunction}*/ from 'express';
+import http from 'node:http'
 // import bodyParser from 'body-parser';
 import cors/*, { type CorsOptions, type CorsOptionsDelegate }*/ from 'cors';
 import dotenv from 'dotenv';
@@ -6,8 +7,12 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 // import supabase from './supabase/supabase_server.js';
 import crypto from 'crypto';
-import { createClient } from '@supabase/supabase-js';
 import { rateLimit } from 'express-rate-limit';
+// import slowDown from 'express-slow-down';
+// TODO: do more research on slowDown before npm i
+// TODO: ^^^ remove slowDown b/c using rate-limiter-flexible instead
+import { z } from 'zod';
+import { supaAnon, supaWithToken } from './supabase/clients.js';
 // ---------------
 import apiRoutes from './routes/apiRoute.js';
 import postsRoute from './routes/postsRoute.js';
@@ -15,6 +20,7 @@ import downloadResumeRoute from './routes/downloadResumeRoute.js';
 import rateLimiter from './middleware/rateLimiter.js';
 import { localLogger } from './helpers/localLogger.js';
 import { redisSessionStore } from './helpers/redisSessionStore.js';
+import { initLoginRateLimiter, limiterConsecutiveFailsByUsernameAndIP, limiterSlowBruteByIP, getUsernameIPkey } from './helpers/loginRateLimiter.js';
 // ---------------
 dotenv.config();
 const port = process.env.PORT;
@@ -29,6 +35,16 @@ app.set("trust proxy", 1);
 app.use(helmet({
 	hsts: false,
 	referrerPolicy: { policy: 'no-referrer' },
+	crossOriginResourcePolicy: { policy: 'same-site' },
+	contentSecurityPolicy: {
+		useDefaults: true,
+		directives: {
+			defaultSrc: ["'none'"],
+		},
+		// ^Setting contentSecurityPolicy with default-src 'none' ensures that if the API ever returns HTML (error pages, debug output), the browser won’t auto-load any scripts/images/fonts from anywhere. This reduces XSS/XSSI blast radius without impacting fetch/XHR from myresumesiteexample.xyz (CSP applies to documents, not API responses consumed by fetch).
+		// crossOriginResourcePolicy: 'same-site' tells browsers not to let other “sites” embed your responses as resources (e.g., <img src>, <script src>, <audio src>, or cross-site <iframe>). That blocks common data-leak vectors and drive-by inclusion attacks.
+		// It does not block your frontend’s credentialed fetch/XHR from myresumesiteexample.xyz because those are CORS network requests, not resource embedding. Your CORS allowlist + credentials continues to govern client access.
+	},
 }));
 if (isProdEnv) {
 	app.use(helmet.hsts({ maxAge: 15552000, includeSubDomains: true, preload: true }));
@@ -58,7 +74,17 @@ const corsDelegate = (req, cb) => {
 		: ['Content-Type', 'Authorization', 'X-CSRF-Token'];
   
 	cb(null, {
-	  origin: (origin, done) => done(null, !origin || allowlist.includes(origin)),
+	//   origin: (origin, done) => done(null, !origin || allowlist.includes(origin)),
+	origin: (origin, done) => {
+		if (!origin) return done(null, true);
+		try {
+			const o = new URL(origin);
+			const normalized = `${o.protocol}//${o.host}`;
+			return done(null, allowlist.includes(normalized));
+		} catch {
+			return done(null, false);
+		}
+	  },
 	  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
 	  credentials: true, // produce Access-Control-Allow-Credentials: true
 	  				//   https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Credentials
@@ -81,6 +107,9 @@ app.options(/.*/, cors(corsDelegate));
 
 // Don't rate-limit preflights (OPTIONS carry no creds)
 app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : next()));
+// Initialize Redis-backed login rate limiters (non-blocking start)
+void initLoginRateLimiter().catch((e) => console.warn('[rate-limiter init error]', e?.message || e));
+
 
 
 // Session config (idle + absolute lifetimes)
@@ -190,8 +219,9 @@ function verifyCsrfToken(req) {
 	const expected = sign(secret, payload);
 	return timingSafeEq(expected, mac);
 }
+
 function requireCsrf(req, res, next) {
-	if (!verifyCsrfToken(req)) return res.status(403).json({ error: 'Invalid CSRF token' });
+	if (!verifyCsrfToken(req)) return res.status(403).json({ error: { code: 'CSRF_INVALID', message: 'Invalid CSRF token' } });
 	next();
 }
 
@@ -209,14 +239,13 @@ app.get('/auth/csrf', (req, res) => {
 	res.json({ csrfToken });
 });
 
-// Sessions & auth helpers
-const supaAnon = () => createClient(SUPABASE_URL, SUPABASE_ANON, {
-	auth: { persistSession: false, autoRefreshToken: false },
-});
-const supaWithToken = (access_token) => createClient(SUPABASE_URL, SUPABASE_ANON, {
-	global: { headers: { Authorization: `Bearer ${access_token}` } },
-	auth: { persistSession: false, autoRefreshToken: false },
-});
+// Input validation schemas and brute-force slowdown
+const LoginSchema = z.object({ email: z.string().email(), password: z.string().min(6) });
+// const authSlowdown = slowDown({
+// 	windowMs: 15 * 60 * 1000,
+// 	delayAfter: 5,
+// 	delayMs: (hits) => Math.min(hits * 250, 3000),
+// });
 function setSidCookie(res, sid) {
 	res.cookie('sid', sid, {
 		httpOnly: true,
@@ -228,12 +257,49 @@ function setSidCookie(res, sid) {
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 50 });
 
-app.post('/auth/login', authLimiter, requireCsrf, async (req, res) => {
-	const { email, password } = req.body ?? {};
-	if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+app.post('/auth/login', authLimiter, /*authSlowdown, */requireCsrf, async (req, res) => {
+	const parsed = LoginSchema.safeParse(req.body ?? {});
+	if (!parsed.success) return res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'Invalid credentials payload' } });
+	const { email, password } = parsed.data;
+
+	// node-rate-limiter-flexible protection (username+IP and IP per day)
+	const ipAddr = req.ip;
+	const usernameIPkey = getUsernameIPkey(email, ipAddr);
+	try {
+		const [resUsernameAndIP, resSlowByIP] = await Promise.all([
+			limiterConsecutiveFailsByUsernameAndIP.get(usernameIPkey),
+			limiterSlowBruteByIP.get(ipAddr),
+		]);
+		let retrySecs = 0;
+		if (resSlowByIP && resSlowByIP.consumedPoints > Number(process.env.RLF_MAX_FAILS_PER_IP_PER_DAY || 100)) {
+			retrySecs = Math.round(resSlowByIP.msBeforeNext / 1000) || 1;
+		} else if (resUsernameAndIP && resUsernameAndIP.consumedPoints > Number(process.env.RLF_MAX_CONSEC_FAILS_USERNAME_IP || 10)) {
+			retrySecs = Math.round(resUsernameAndIP.msBeforeNext / 1000) || 1;
+		}
+		if (retrySecs > 0) {
+			res.set('Retry-After', String(retrySecs));
+			return res.status(429).json({ error: { code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try later.' } });
+		}
+	} catch (e) {
+		// If rate limiter storage fails, proceed but log
+		console.warn('[rate-limit check error]', e?.message || e);
+	}
 
 	const { data, error } = await supaAnon().auth.signInWithPassword({ email, password });
-	if (error || !data?.session) return res.status(401).json({ error: 'invalid credentials' });
+	if (error || !data?.session) {
+		try {
+			const promises = [limiterSlowBruteByIP.consume(ipAddr)];
+			// Only count consecutive fails for existing users to avoid user enumeration amplification
+			promises.push(limiterConsecutiveFailsByUsernameAndIP.consume(usernameIPkey));
+			await Promise.all(promises);
+		} catch (rlRejected) {
+			if (rlRejected && typeof rlRejected === 'object' && 'msBeforeNext' in rlRejected) {
+				res.set('Retry-After', String(Math.round((rlRejected.msBeforeNext || 0) / 1000)) || '1');
+				return res.status(429).json({ error: { code: 'TOO_MANY_REQUESTS', message: 'Too many attempts. Try later.' } });
+			}
+		}
+		return res.status(401).json({ error: 'invalid credentials' });
+	}
 
 	const { access_token, refresh_token, expires_at } = data.session;
 	const sid = b64url(crypto.randomBytes(32));
@@ -245,11 +311,13 @@ app.post('/auth/login', authLimiter, requireCsrf, async (req, res) => {
 		SESSION_ABSOLUTE_LIFETIME_SECONDS
 	);
 	setSidCookie(res, sid);
+	// reset consecutive fails on success
+	try { await limiterConsecutiveFailsByUsernameAndIP.delete(usernameIPkey); } catch {}
 	localLogger('auth-in request successful', {email})
 	res.status(204).end();	
 });
 
-app.post('/auth/logout', authLimiter, requireCsrf, async (req, res) => {
+app.post('/auth/logout', authLimiter, /*authSlowdown, */requireCsrf, async (req, res) => {
 	const sid = req.cookies?.sid;
 	// const sess = sid ? sessions.get(sid) : null;
 	// if (sess)
@@ -257,9 +325,11 @@ app.post('/auth/logout', authLimiter, requireCsrf, async (req, res) => {
 		const sess = await redisSessionStore.get(sid);
 		if (sess) {
 			await supaWithToken(sess.access_token).auth.signOut();
+			localLogger('auth-out from supabase using redis session store')
 		}
 		// sessions.delete(sid);
 		await redisSessionStore.del(sid);
+		localLogger('sid deleted from redis session store')
 	}
 	// Clear cookie using the same attributes used when setting it
 	res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
@@ -268,7 +338,7 @@ app.post('/auth/logout', authLimiter, requireCsrf, async (req, res) => {
 });
 
 // Refresh access token using stored refresh_token
-app.post('/auth/refresh', authLimiter, requireCsrf, async (req, res) => {
+app.post('/auth/refresh', authLimiter, /*authSlowdown, */requireCsrf, async (req, res) => {
 	const sid = req.cookies?.sid;
 	if (!sid) return res.status(401).json({ error: 'not authenticated' });
 	// const sess = sessions.get(sid);
@@ -320,36 +390,6 @@ app.get('/auth/session', authLimiter, async (req, res) => {
 	if (error) return res.status(401).json({ authenticated: false });
 	res.json({ authenticated: true, user: data.user });
 });
-
-/*
-app.get('/auth/session', authLimiter, async (req, res) => {
-	const sid = req.cookies?.sid;
-	if (!sid) return res.status(401).json({ authenticated: false });
-	const sess = await redisSessionStore.get(sid);
-	if (!sess) return res.status(401).json({ authenticated: false });
-
-	// Optionally auto-refresh if near expiry
-	const now = Math.floor(Date.now() / 1000);
-	if (sess.expires_at && now > (sess.expires_at - 30)) {
-		const { data, error } = await supaAnon().auth.refreshSession({ refresh_token: sess.refresh_token });
-		if (error || !data?.session) {
-			await redisSessionStore.del(sid);
-			res.clearCookie('sid', { path: '/', sameSite: IS_PROD ? 'none' : 'lax', secure: IS_PROD, httpOnly: true });
-			return res.status(401).json({ authenticated: false });
-		}
-		const { access_token, refresh_token, expires_at } = data.session;
-		await redisSessionStore.set(sid, { access_token, refresh_token, expires_at }, SESSION_IDLE_TTL_SECONDS, SESSION_ABSOLUTE_LIFETIME_SECONDS);
-	}
-
-	// FIX: read the current token before calling Supabase
-	const current = await redisSessionStore.get(sid);
-	if (!current) return res.status(401).json({ authenticated: false });
-
-	const { data, error } = await supaWithToken(current.access_token).auth.getUser();
-	if (error) return res.status(401).json({ authenticated: false });
-	res.json({ authenticated: true, user: data.user });
-});
-*/
 // -------------AIAC---------------
 // --------------------------------
 // --------------------------------
@@ -365,22 +405,27 @@ app.get('/', (_, res) => {
 // lightweight health check
 app.get('/health', (_, res) => res.status(200).json({ status: 'ok' }));
 
-app.use((_, res) => res.status(404).json({ error: 'Not found' }));
+app.use((_, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Not found' } }));
 app.use((err, req, res, next) => {
   console.error('[Unhandled error]', err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ error: { code: 'INTERNAL', message: 'Internal server error' } });
 });
 
-app.listen(port, () => {
-	console.log(`Starting server on port: ${port}`);
-});
+// app.listen(port, () => {
+// 	console.log(`Starting server on port: ${port}`);
+// });
 
-app.headersTimeout = 62000;   // 62s
-app.keepAliveTimeout = 61000; // 61s
+const server = http.createServer(app);
+
+server.headersTimeout = 62000;   // 62s
+server.keepAliveTimeout = 61000; // 61s
 // how long the server keeps the TCP connection idle waiting for the next request before destroying the socket
 // For apps behind load balancers (ALB/ELB, GCP, etc.), it’s common to set keepAliveTimeout slightly above the LB’s idle timeout (e.g., 61s for a 60s LB) so the server doesn’t close first, avoiding intermittent 502/ECONNRESET issues.
 // Also, make headersTimeout a bit greater than keepAliveTimeout (e.g., 62s vs 61s) so when a client reuses a keep-alive connection, there’s a small grace period to deliver the next request’s headers. Your code currently has headersTimeout (60s) below keepAliveTimeout (61s); flip that to follow the common guidance.
-app.requestTimeout = 30000;   // 30s
+server.requestTimeout = 30000;   // 30s
+server.listen(port, () => {
+	console.log(`Starting server on port: ${port}`);
+})
 
 // --------------------------------
 // graceful shutdown

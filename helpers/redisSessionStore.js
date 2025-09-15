@@ -1,7 +1,7 @@
 // Hardened session store using node-redis + in-memory fallback.
 // - Idle TTL + touch() for rolling sessions
 // - Optional absolute lifetime cap (__abs)
-// - Local in-memory fallback
+// - Local in-memory fallback when no redis env's are provided
 // - Graceful shutdown
 // - TLS via env-provided cert paths (works with K8s/containers secrets)
 // References:
@@ -11,6 +11,7 @@
 
 
 import { createClient } from 'redis';
+import { localLogger } from './localLogger.js';
 // import fs from 'fs';
 
 const redisUrl = process.env.REDIS_HOST && process.env.REDIS_PORT ? `${process.env.REDIS_HOST}:${process.env.REDIS_PORT}` : null;
@@ -102,6 +103,7 @@ export const redisSessionStore = {
 
 		if (redis) {
 			await redis.set(key(sid), JSON.stringify(payload), { EX: ttl });
+			localLogger('sid set in redis session store')
 			return 'OK';
 		}
 		mem.set(sid, { value: payload, expMs: now() + ttl * 1000 });

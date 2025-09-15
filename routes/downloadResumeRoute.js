@@ -6,7 +6,7 @@ export const routesMeta = [
 // ---------------
 import { Router } from 'express';
 // import { supabaseAdmin } from '../supabase/supabase_admin.js';
-import supabase from '../supabase/supabase_server.js';
+import { supaAnon } from '../supabase/clients.js';
 import { Readable } from 'node:stream';
 import { localLogger } from '../helpers/localLogger.js';
 
@@ -21,6 +21,7 @@ router.get('/', async (req, res) => {
   try {
     // (Optional) authorize the user here if needed (req.user, cookie, etc.)
 
+    const supabase = supaAnon();
     const { data, error } = await /*supabaseAdmin*/ supabase
       .storage
       .from(BUCKET)
@@ -36,7 +37,7 @@ router.get('/', async (req, res) => {
 
     if (error || !data) {
       console.error('[Supabase download error]', error);
-      return res.status(502).json({ message: 'Failed to fetch file' });
+      return res.status(502).json({ error: { code: 'STORAGE_FETCH_FAILED', message: 'Failed to fetch file' } });
     }
 
     // data is a Blob (Node 18+ supports Web Streams/Blob)
@@ -58,7 +59,7 @@ router.get('/', async (req, res) => {
     return res.end(buf);
   } catch (e) {
     console.error('[Download handler error]', e);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ error: { code: 'INTERNAL', message: 'Server error' } });
   }
 });
 
