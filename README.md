@@ -2,6 +2,8 @@
 
 Express API that authenticates with Supabase and issues a secure httpOnly session cookie ("sid") for use by a separate front-end.
 
+Notating summaries & documentation in-line for reference where applicable
+
 ## Required environment
 
 Create a `.env` file in this directory:
